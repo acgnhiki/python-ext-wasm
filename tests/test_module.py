@@ -131,7 +131,7 @@ def test_imports():
             'name': 't1',
             'minimum_elements': 1,
             'maximum_elements': 2,
-            'element_type': 'anyfunc',
+            'element_type': 'funcref',
         }
     ]
 
