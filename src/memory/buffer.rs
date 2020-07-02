@@ -1,6 +1,7 @@
 //! The `Buffer` Python object to represent a WebAssembly memory
 //! through the Python Buffer Protocol.
 
+use crate::wasmer::runtime::memory::Memory;
 use pyo3::{
     class::buffer::PyBufferProtocol,
     exceptions::BufferError,
@@ -15,9 +16,8 @@ use std::{
     ptr,
     sync::Arc,
 };
-use wasmer_runtime::memory::Memory;
 
-#[pyclass]
+#[pyclass(unsendable)]
 pub struct Buffer {
     pub memory: Arc<Memory>,
 }

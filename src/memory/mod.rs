@@ -1,14 +1,13 @@
 //! Memory API of an WebAssembly instance.
 
+use crate::wasmer::{core::units::Pages, runtime::Memory as WasmMemory};
 use pyo3::{exceptions::RuntimeError, prelude::*};
 use std::sync::Arc;
-use wasmer_runtime::Memory as WasmMemory;
-use wasmer_runtime_core::units::Pages;
 
 pub mod buffer;
 pub mod view;
 
-#[pyclass]
+#[pyclass(unsendable)]
 pub struct Memory {
     pub memory: Arc<WasmMemory>,
 }

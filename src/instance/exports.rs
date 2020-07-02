@@ -1,7 +1,15 @@
 //! The `ExportedFunction` and relative collection that encapsulate Wasmer
 //!  memory and instances.
 
-use crate::{instance::inspect::InspectExportedFunction, r#type::Type, value::Value};
+use crate::{
+    instance::inspect::InspectExportedFunction,
+    r#type::Type,
+    value::Value,
+    wasmer::{
+        core::{instance::DynFunc, types::Type as WasmType},
+        runtime::{self as runtime, Value as WasmValue},
+    },
+};
 use pyo3::{
     class::basic::PyObjectProtocol,
     exceptions::{LookupError, RuntimeError},
@@ -10,8 +18,6 @@ use pyo3::{
     ToPyObject,
 };
 use std::{cmp::Ordering, convert::From, slice, sync::Arc};
-use wasmer_runtime::{self as runtime, Value as WasmValue};
-use wasmer_runtime_core::{instance::DynFunc, types::Type as WasmType};
 
 #[derive(Copy, Clone)]
 #[repr(u8)]
@@ -46,13 +52,13 @@ impl From<&ExportImportKind> for &'static str {
     }
 }
 
-impl From<&runtime::Export> for ExportImportKind {
-    fn from(value: &runtime::Export) -> Self {
+impl From<&runtime::RuntimeExport> for ExportImportKind {
+    fn from(value: &runtime::RuntimeExport) -> Self {
         match value {
-            runtime::Export::Function { .. } => ExportImportKind::Function,
-            runtime::Export::Memory(..) => ExportImportKind::Memory,
-            runtime::Export::Global(..) => ExportImportKind::Global,
-            runtime::Export::Table(..) => ExportImportKind::Table,
+            runtime::RuntimeExport::Function { .. } => ExportImportKind::Function,
+            runtime::RuntimeExport::Memory(..) => ExportImportKind::Memory,
+            runtime::RuntimeExport::Global(..) => ExportImportKind::Global,
+            runtime::RuntimeExport::Table(..) => ExportImportKind::Table,
         }
     }
 }
@@ -135,6 +141,12 @@ pub(super) fn call_exported_func(
                 WasmType::V128 => {
                     WasmValue::V128(argument.downcast::<PyLong>()?.extract::<u128>()?)
                 }
+                parameter => {
+                    return Err(RuntimeError::py_err(format!(
+                        "Parameter of type `{:?}` isn't supported.",
+                        parameter
+                    )))
+                }
             },
         };
 
@@ -152,12 +164,18 @@ pub(super) fn call_exported_func(
         // indexing may panic. But in this particular case, we know
         // `results` is not empty because of the previous line.
         #[allow(clippy::match_on_vec_items)]
-        Ok(match results[0] {
+        Ok(match &results[0] {
             WasmValue::I32(result) => result.to_object(py),
             WasmValue::I64(result) => result.to_object(py),
             WasmValue::F32(result) => result.to_object(py),
             WasmValue::F64(result) => result.to_object(py),
             WasmValue::V128(result) => result.to_object(py),
+            result => {
+                return Err(RuntimeError::py_err(format!(
+                    "Result of type `{:?}` isn't supported.",
+                    result
+                )))
+            }
         })
     } else {
         Ok(py.None())
@@ -197,7 +215,7 @@ impl ExportedFunction {
         let args = annotations.keys();
 
         for ty in &signature
-            .returns()
+            .results()
             .iter()
             .map(Into::into)
             .collect::<Vec<Type>>()

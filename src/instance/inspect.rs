@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use wasmer_runtime_core::instance::DynFunc;
+use crate::wasmer::core::instance::DynFunc;
 
 /// Convenience functions to allow inspection of an exported
 /// function. Note: Python provides the `inspect` module for

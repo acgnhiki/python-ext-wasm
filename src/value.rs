@@ -1,9 +1,9 @@
 //! The `Value` Python class to build WebAssembly values.
 
+use crate::wasmer::runtime::Value as WasmValue;
 use pyo3::{class::basic::PyObjectProtocol, prelude::*, PyNativeType};
-use wasmer_runtime::Value as WasmValue;
 
-#[pyclass]
+#[pyclass(unsendable)]
 /// The `Value` class represents a WebAssembly value.
 pub struct Value {
     pub value: WasmValue,

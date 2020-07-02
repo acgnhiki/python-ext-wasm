@@ -1,8 +1,8 @@
 //! The `Value` Python class to build WebAssembly values.
 
+use crate::wasmer::core::types::Type as WasmType;
 use pyo3::prelude::*;
 use std::slice;
-use wasmer_runtime_core::types::Type as WasmType;
 
 #[derive(Copy, Clone)]
 #[repr(u8)]
@@ -42,6 +42,7 @@ impl From<&WasmType> for Type {
             WasmType::F32 => Type::F32,
             WasmType::F64 => Type::F64,
             WasmType::V128 => Type::V128,
+            ty => panic!(format!("Type of kind `{:?}` isn't supported.", ty)),
         }
     }
 }

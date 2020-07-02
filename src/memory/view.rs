@@ -1,5 +1,6 @@
 //! The `*Array` Python objects to represent WebAsembly memory views.
 
+use crate::wasmer::runtime::memory::Memory;
 use pyo3::{
     class::PyMappingProtocol,
     exceptions::{IndexError, RuntimeError, ValueError},
@@ -7,11 +8,10 @@ use pyo3::{
     types::{PyAny, PyInt, PyLong, PySequence, PySlice},
 };
 use std::{cmp::min, mem::size_of, ops::Range, sync::Arc};
-use wasmer_runtime::memory::Memory;
 
 macro_rules! memory_view {
     ($class_name:ident over $wasm_type:ty | $bytes_per_element:expr) => {
-        #[pyclass]
+        #[pyclass(unsendable)]
         pub struct $class_name {
             pub memory: Arc<Memory>,
             pub offset: usize,

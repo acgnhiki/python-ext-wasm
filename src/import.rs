@@ -1,7 +1,11 @@
 //! This module contains a helper to build an `ImportObject` and build
 //! the host function logic.
 
-use crate::{instance::exports::ExportImportKind, wasi};
+use crate::{
+    instance::exports::ExportImportKind,
+    wasi,
+    wasmer::{core, runtime, wasi as wasmer_wasi},
+};
 use pyo3::{
     exceptions::RuntimeError,
     prelude::*,
@@ -9,12 +13,10 @@ use pyo3::{
     PyObject,
 };
 use std::sync::Arc;
-use wasmer_runtime as runtime;
-use wasmer_wasi;
 
-#[pyclass]
+#[pyclass(unsendable)]
 /// `ImportObject` is a Python class that represents the
-/// `wasmer_runtime_core::import::ImportObject`.
+/// `crate::wasmer::core::import::ImportObject`.
 pub struct ImportObject {
     pub(crate) inner: runtime::ImportObject,
 
@@ -42,10 +44,11 @@ impl ImportObject {
         wasi: &mut wasi::Wasi,
     ) -> PyResult<Self> {
         Ok(Self {
-            inner: wasmer_wasi::generate_import_object_from_state(
-                wasi.inner.build().map_err(|error| {
+            inner: wasmer_wasi::generate_import_object_from_env(
+                core::get_global_store(),
+                wasmer_wasi::WasiEnv::new(wasi.inner.build().map_err(|error| {
                     RuntimeError::py_err(format!("Failed to create the WASI state: {}", error))
-                })?,
+                })?),
                 version.into(),
             ),
             module,
@@ -70,55 +73,32 @@ impl ImportObject {
         py: Python,
         imported_functions: &PyDict,
     ) -> PyResult<()> {
+        use crate::wasmer::{
+            core::{import::Namespace, typed_func::DynamicFunc, types::ExternDescriptor},
+            runtime::{
+                types::{FuncSig, Type},
+                Value,
+            },
+        };
         use pyo3::{
             types::{PyFloat, PyLong, PyString, PyTuple},
             AsPyPointer,
         };
         use std::collections::HashMap;
-        use wasmer_runtime::{
-            types::{FuncIndex, FuncSig, Type},
-            Value,
-        };
-        use wasmer_runtime_core::{
-            import::Namespace, structures::TypedIndex, typed_func::DynamicFunc,
-        };
 
-        let module_info = &self.module.info();
-        let import_descriptors: HashMap<(String, String), &FuncSig> = module_info
-            .imported_functions
+        let imports = self.module.imports();
+        let import_descriptors: HashMap<(&str, &str), &FuncSig> = imports
             .iter()
-            .map(|(import_index, import_name)| {
-                let namespace = module_info
-                    .namespace_table
-                    .get(import_name.namespace_index)
-                    .to_string();
-                let name = module_info
-                    .name_table
-                    .get(import_name.name_index)
-                    .to_string();
-                let signature = module_info
-                    .signatures
-                    .get(
-                        *module_info
-                            .func_assoc
-                            .get(FuncIndex::new(import_index.index()))
-                            .ok_or_else(|| {
-                                RuntimeError::py_err(format!(
-                                    "Failed to retrieve the signature index of the imported function {}.",
-                                    import_index.index()
-                                ))
-                            })?,
-                    )
-                    .ok_or_else(|| {
-                        RuntimeError::py_err(format!(
-                            "Failed to retrieve the signature of the imported function {}.",
-                            import_index.index()
-                                ))
-                    })?;
-
-                Ok(((namespace, name), signature))
+            .filter_map(|import_type| {
+                Some((
+                    (import_type.module(), import_type.name()),
+                    match import_type.ty() {
+                        ExternDescriptor::Function(function_type) => function_type,
+                        _ => return None,
+                    },
+                ))
             })
-            .collect::<PyResult<HashMap<(String, String), &FuncSig>>>()?;
+            .collect();
 
         let mut host_function_references = Vec::with_capacity(imported_functions.len());
 
@@ -150,7 +130,7 @@ impl ImportObject {
                 }
 
                 let imported_function_signature = import_descriptors
-                    .get(&(namespace_name.to_string(), function_name.to_string()))
+                    .get(&(&namespace_name, &function_name))
                     .ok_or_else(|| {
                         RuntimeError::py_err(
                             format!(
@@ -187,7 +167,7 @@ impl ImportObject {
                             imported_function_signature
                                 .params()
                                 .iter()
-                                .chain(imported_function_signature.returns().iter()),
+                                .chain(imported_function_signature.results().iter()),
                         )
                     {
                         let ty = match annotation_value.to_string().as_str() {
@@ -216,7 +196,7 @@ impl ImportObject {
                     }
                 } else {
                     input_types.extend(imported_function_signature.params());
-                    output_types.extend(imported_function_signature.returns());
+                    output_types.extend(imported_function_signature.results());
                 }
 
                 let function = function.to_object(py);
@@ -224,78 +204,101 @@ impl ImportObject {
                 host_function_references.push(function.clone_ref(py));
 
                 let function_implementation = DynamicFunc::new(
-                    Arc::new(FuncSig::new(input_types, output_types.clone())),
-                    move |_, inputs: &[Value]| -> Vec<Value> {
+                    &FuncSig::new(input_types, output_types.clone()),
+                    move |_, inputs: &[Value]| -> Result<Vec<Value>, core::error::RuntimeError> {
                         let gil = GILGuard::acquire();
                         let py = gil.python();
 
-                        let inputs = inputs
+                        let inputs: Vec<PyObject> = inputs
                             .iter()
-                            .map(|input| match input {
-                                Value::I32(value) => value.to_object(py),
-                                Value::I64(value) => value.to_object(py),
-                                Value::F32(value) => value.to_object(py),
-                                Value::F64(value) => value.to_object(py),
-                                Value::V128(value) => value.to_object(py),
+                            .map(|input| {
+                                Ok(match input {
+                                    Value::I32(value) => value.to_object(py),
+                                    Value::I64(value) => value.to_object(py),
+                                    Value::F32(value) => value.to_object(py),
+                                    Value::F64(value) => value.to_object(py),
+                                    Value::V128(value) => value.to_object(py),
+                                    input => {
+                                        return Err(core::error::RuntimeError::new(format!(
+                                            "Input `{:?}` isn't supported.",
+                                            input
+                                        )));
+                                    }
+                                })
                             })
-                            .collect::<Vec<PyObject>>();
+                            .collect::<Result<_, _>>()?;
 
                         if function.as_ptr().is_null() {
-                            panic!("Host function implementation is null. Maybe it has moved?");
+                            return Err(core::error::RuntimeError::new(
+                                "Host function implementation is null. Maybe it has moved?",
+                            ));
                         }
 
-                        let results = function
-                            .call(py, PyTuple::new(py, inputs), None)
-                            .expect("Oh dear, trap, quick");
+                        let results =
+                            function
+                                .call(py, PyTuple::new(py, inputs), None)
+                                .map_err(|_| {
+                                    core::error::RuntimeError::new(
+                                        "Failed to call the host function.",
+                                    )
+                                })?;
 
                         let results = match results.cast_as::<PyTuple>(py) {
                             Ok(results) => results,
                             Err(_) => PyTuple::new(py, vec![results]),
                         };
 
-                        let outputs = results
+                        let outputs: Vec<Value> = results
                             .iter()
                             .zip(output_types.iter())
-                            .map(|(result, output)| match output {
-                                Type::I32 => Value::I32(
-                                    result
-                                        .downcast::<PyLong>()
-                                        .unwrap()
-                                        .extract::<i32>()
-                                        .unwrap(),
-                                ),
-                                Type::I64 => Value::I64(
-                                    result
-                                        .downcast::<PyLong>()
-                                        .unwrap()
-                                        .extract::<i64>()
-                                        .unwrap(),
-                                ),
-                                Type::F32 => Value::F32(
-                                    result
-                                        .downcast::<PyFloat>()
-                                        .unwrap()
-                                        .extract::<f32>()
-                                        .unwrap(),
-                                ),
-                                Type::F64 => Value::F64(
-                                    result
-                                        .downcast::<PyFloat>()
-                                        .unwrap()
-                                        .extract::<f64>()
-                                        .unwrap(),
-                                ),
-                                Type::V128 => Value::V128(
-                                    result
-                                        .downcast::<PyLong>()
-                                        .unwrap()
-                                        .extract::<u128>()
-                                        .unwrap(),
-                                ),
+                            .map(|(result, output)| {
+                                Ok(match output {
+                                    Type::I32 => Value::I32(
+                                        result
+                                            .downcast::<PyLong>()
+                                            .unwrap()
+                                            .extract::<i32>()
+                                            .unwrap(),
+                                    ),
+                                    Type::I64 => Value::I64(
+                                        result
+                                            .downcast::<PyLong>()
+                                            .unwrap()
+                                            .extract::<i64>()
+                                            .unwrap(),
+                                    ),
+                                    Type::F32 => Value::F32(
+                                        result
+                                            .downcast::<PyFloat>()
+                                            .unwrap()
+                                            .extract::<f32>()
+                                            .unwrap(),
+                                    ),
+                                    Type::F64 => Value::F64(
+                                        result
+                                            .downcast::<PyFloat>()
+                                            .unwrap()
+                                            .extract::<f64>()
+                                            .unwrap(),
+                                    ),
+                                    Type::V128 => Value::V128(
+                                        result
+                                            .downcast::<PyLong>()
+                                            .unwrap()
+                                            .extract::<u128>()
+                                            .unwrap(),
+                                    ),
+                                    output => {
+                                        return Err(core::error::RuntimeError::new(format!(
+                                            "Output `{:?}` isn't supported.",
+                                            output
+                                        )));
+                                    }
+                                })
                             })
-                            .collect();
+                            .collect::<Result<_, _>>()?;
 
-                        outputs
+                        Ok(outputs)
                     },
                 );
 
@@ -359,8 +362,10 @@ impl ImportObject {
         let iterator = self.inner.clone().into_iter();
         let mut items: Vec<&PyDict> = Vec::with_capacity(iterator.size_hint().0);
 
-        for (namespace, name, import) in iterator {
+        for ((namespace, name), import) in iterator {
             let dict = PyDict::new(py);
+
+            let import: crate::wasmer::core::export::RuntimeExport = import;
 
             dict.set_item("kind", ExportImportKind::from(&import) as u8)?;
             dict.set_item("namespace", namespace)?;

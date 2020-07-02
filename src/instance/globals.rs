@@ -1,5 +1,9 @@
 //! The `ExportedGlobals` and `ExportedGlobal` objects.
 
+use crate::wasmer::{
+    core::global::Global,
+    runtime::{types::Type, Value as WasmValue},
+};
 use pyo3::{
     class::basic::PyObjectProtocol,
     exceptions::{LookupError, RuntimeError},
@@ -7,10 +11,8 @@ use pyo3::{
     types::{PyAny, PyFloat, PyLong},
 };
 use std::sync::Arc;
-use wasmer_runtime::{types::Type, Value as WasmValue};
-use wasmer_runtime_core::global::Global;
 
-#[pyclass]
+#[pyclass(unsendable)]
 /// `ExportedGlobal` is a Python class that represents a WebAssembly
 /// exported global variable. Such a variable can be read and write
 /// with the `value` getter and setter.
@@ -26,14 +28,20 @@ pub struct ExportedGlobal {
 /// Implement methods on the `ExportedGlobal` Python class.
 impl ExportedGlobal {
     #[getter(value)]
-    fn get_value(&self, py: Python) -> PyObject {
-        match self.global.get() {
+    fn get_value(&self, py: Python) -> PyResult<PyObject> {
+        Ok(match self.global.get() {
             WasmValue::I32(result) => result.to_object(py),
             WasmValue::I64(result) => result.to_object(py),
             WasmValue::F32(result) => result.to_object(py),
             WasmValue::F64(result) => result.to_object(py),
             WasmValue::V128(result) => result.to_object(py),
-        }
+            ty => {
+                return Err(RuntimeError::py_err(format!(
+                    "Global contains a value of kind `{:?}` which isn't supported.",
+                    ty
+                )))
+            }
+        })
     }
 
     #[setter(value)]
@@ -53,6 +61,12 @@ impl ExportedGlobal {
             Type::F32 => WasmValue::F32(value.downcast::<PyFloat>()?.extract::<f32>()?),
             Type::F64 => WasmValue::F64(value.downcast::<PyFloat>()?.extract::<f64>()?),
             Type::V128 => WasmValue::V128(value.downcast::<PyLong>()?.extract::<u128>()?),
+            ty => {
+                return Err(RuntimeError::py_err(format!(
+                    "Global contains a value of kind `{:?}` which isn't supported.",
+                    ty
+                )))
+            }
         });
 
         Ok(())
@@ -64,7 +78,7 @@ impl ExportedGlobal {
     }
 }
 
-#[pyclass]
+#[pyclass(unsendable)]
 /// `ExportedGlobals` is a Python class that represents the set
 /// of WebAssembly exported globals. It's basically a set of
 /// `ExportedGlobal` classes.

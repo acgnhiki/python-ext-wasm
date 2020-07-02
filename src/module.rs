@@ -9,6 +9,14 @@ use crate::{
     },
     memory::Memory,
     wasi,
+    wasmer::{
+        core::{
+            cache::Artifact,
+            module::ExportIndex,
+            types::{ExternDescriptor, Type},
+        },
+        runtime::{self as runtime, validate, Export},
+    },
 };
 use pyo3::{
     exceptions::RuntimeError,
@@ -17,16 +25,9 @@ use pyo3::{
     PyTryFrom,
 };
 use std::sync::Arc;
-use wasmer_runtime::{self as runtime, validate, Export};
-use wasmer_runtime_core::{
-    self as runtime_core,
-    cache::Artifact,
-    module::{ExportIndex, ImportName},
-    types::{ElementType, Type},
-};
 use wasmer_wasi;
 
-#[pyclass]
+#[pyclass(unsendable)]
 #[text_signature = "(bytes)"]
 /// `Module` is a Python class that represents a WebAssembly module.
 pub struct Module {
@@ -139,10 +140,12 @@ impl Module {
 
         for (export_name, export) in exports {
             match export {
-                Export::Function { .. } => exported_functions.push(export_name),
-                Export::Global(global) => exported_globals.push((export_name, Arc::new(global))),
+                Export::Function { .. } => exported_functions.push(export_name.clone()),
+                Export::Global(global) => {
+                    exported_globals.push((export_name.clone(), Arc::new(global.into())))
+                }
                 Export::Memory(memory) if exported_memory.is_none() => {
-                    exported_memory = Some(Arc::new(memory))
+                    exported_memory = Some(Arc::new(memory.into()))
                 }
                 _ => (),
             }
@@ -190,7 +193,7 @@ impl Module {
             dict.set_item(
                 "kind",
                 match export_index {
-                    ExportIndex::Func(_) => ExportImportKind::Function,
+                    ExportIndex::Function(_) => ExportImportKind::Function,
                     ExportIndex::Memory(_) => ExportImportKind::Memory,
                     ExportIndex::Global(_) => ExportImportKind::Global,
                     ExportIndex::Table(_) => ExportImportKind::Table,
@@ -222,140 +225,78 @@ impl Module {
     ///     pairs.
     #[getter]
     fn imports<'p>(&self, py: Python<'p>) -> PyResult<&'p PyList> {
-        let module_info = &self.inner.info();
-        let functions = &module_info.imported_functions;
-        let memories = &module_info.imported_memories;
-        let globals = &module_info.imported_globals;
-        let tables = &module_info.imported_tables;
+        let imports = self.inner.imports();
+        let mut items: Vec<&PyDict> = Vec::with_capacity(imports.len());
 
-        let mut items: Vec<&PyDict> =
-            Vec::with_capacity(functions.len() + memories.len() + globals.len() + tables.len());
-
-        let namespace_table = &module_info.namespace_table;
-        let name_table = &module_info.name_table;
-
-        // Imported functions.
-        for (
-            _index,
-            ImportName {
-                namespace_index,
-                name_index,
-            },
-        ) in functions
-        {
-            let namespace = namespace_table.get(*namespace_index);
-            let name = name_table.get(*name_index);
-
+        for import_descriptor in imports {
             let dict = PyDict::new(py);
+            let module = import_descriptor.module();
+            let name = import_descriptor.name();
+            let ty = import_descriptor.ty();
 
-            dict.set_item("kind", ExportImportKind::Function as u8)?;
-            dict.set_item("namespace", namespace)?;
-            dict.set_item("name", name)?;
+            match ty {
+                ExternDescriptor::Function(_) => {
+                    dict.set_item("kind", ExportImportKind::Function as u8)?;
+                    dict.set_item("namespace", module)?;
+                    dict.set_item("name", name)?;
+                }
+                ExternDescriptor::Memory(memory) => {
+                    dict.set_item("kind", ExportImportKind::Memory as u8)?;
+                    dict.set_item("namespace", module)?;
+                    dict.set_item("name", name)?;
+                    dict.set_item("minimum_pages", memory.minimum.0)?;
+                    dict.set_item(
+                        "maximum_pages",
+                        memory
+                            .maximum
+                            .map(|page| page.0.into_py(py))
+                            .unwrap_or_else(|| py.None()),
+                    )?;
+                }
+                ExternDescriptor::Global(global) => {
+                    let mutable: bool = global.mutability.into();
 
-            items.push(dict);
-        }
-
-        // Imported memories.
-        for (
-            _index,
-            (
-                ImportName {
-                    namespace_index,
-                    name_index,
-                },
-                memory_descriptor,
-            ),
-        ) in memories
-        {
-            let namespace = namespace_table.get(*namespace_index);
-            let name = name_table.get(*name_index);
-
-            let dict = PyDict::new(py);
-
-            dict.set_item("kind", ExportImportKind::Memory as u8)?;
-            dict.set_item("namespace", namespace)?;
-            dict.set_item("name", name)?;
-            dict.set_item("minimum_pages", memory_descriptor.minimum.0)?;
-            dict.set_item(
-                "maximum_pages",
-                memory_descriptor
-                    .maximum
-                    .map(|page| page.0.into_py(py))
-                    .unwrap_or_else(|| py.None()),
-            )?;
-
-            items.push(dict);
-        }
-
-        // Imported globals.
-        for (
-            _index,
-            (
-                ImportName {
-                    namespace_index,
-                    name_index,
-                },
-                global_descriptor,
-            ),
-        ) in globals
-        {
-            let namespace = namespace_table.get(*namespace_index);
-            let name = name_table.get(*name_index);
-
-            let dict = PyDict::new(py);
-
-            dict.set_item("kind", ExportImportKind::Global as u8)?;
-            dict.set_item("namespace", namespace)?;
-            dict.set_item("name", name)?;
-            dict.set_item("mutable", global_descriptor.mutable)?;
-            dict.set_item(
-                "type",
-                match global_descriptor.ty {
-                    Type::I32 => "i32",
-                    Type::I64 => "i64",
-                    Type::F32 => "f32",
-                    Type::F64 => "f64",
-                    Type::V128 => "v128",
-                },
-            )?;
-
-            items.push(dict);
-        }
-
-        // Imported tables.
-        for (
-            _index,
-            (
-                ImportName {
-                    namespace_index,
-                    name_index,
-                },
-                table_descriptor,
-            ),
-        ) in tables
-        {
-            let namespace = namespace_table.get(*namespace_index);
-            let name = name_table.get(*name_index);
-
-            let dict = PyDict::new(py);
-
-            dict.set_item("kind", ExportImportKind::Table as u8)?;
-            dict.set_item("namespace", namespace)?;
-            dict.set_item("name", name)?;
-            dict.set_item("minimum_elements", table_descriptor.minimum)?;
-            dict.set_item(
-                "maximum_elements",
-                table_descriptor
-                    .maximum
-                    .map(|number| number.into_py(py))
-                    .unwrap_or_else(|| py.None()),
-            )?;
-            dict.set_item(
-                "element_type",
-                match table_descriptor.element {
-                    ElementType::Anyfunc => "anyfunc",
-                },
-            )?;
+                    dict.set_item("kind", ExportImportKind::Global as u8)?;
+                    dict.set_item("namespace", module)?;
+                    dict.set_item("name", name)?;
+                    dict.set_item("mutable", mutable)?;
+                    dict.set_item(
+                        "type",
+                        match global.ty {
+                            Type::I32 => "i32",
+                            Type::I64 => "i64",
+                            Type::F32 => "f32",
+                            Type::F64 => "f64",
+                            Type::V128 => "v128",
+                            _ => unimplemented!("{}", global.ty),
+                        },
+                    )?;
+                }
+                ExternDescriptor::Table(table) => {
+                    dict.set_item("kind", ExportImportKind::Table as u8)?;
+                    dict.set_item("namespace", module)?;
+                    dict.set_item("name", name)?;
+                    dict.set_item("minimum_elements", table.minimum)?;
+                    dict.set_item(
+                        "maximum_elements",
+                        table
+                            .maximum
+                            .map(|number| number.into_py(py))
+                            .unwrap_or_else(|| py.None()),
+                    )?;
+                    dict.set_item(
+                        "element_type",
+                        match table.ty {
+                            Type::I32 => "i32",
+                            Type::I64 => "i64",
+                            Type::F32 => "f32",
+                            Type::F64 => "f64",
+                            Type::V128 => "v128",
+                            _ => unimplemented!("{}", table.ty),
+                        },
+                    )?;
+                }
+            }
 
             items.push(dict);
         }
@@ -375,11 +316,8 @@ impl Module {
     #[text_signature = "($self, name, index=0)"]
     #[args(index = 0)]
     fn custom_section<'p>(&self, py: Python<'p>, name: String, index: usize) -> PyObject {
-        match self.inner.info().custom_sections.get(&name) {
-            Some(bytes) => match bytes.get(index) {
-                Some(bytes) => PyBytes::new(py, bytes).into_py(py),
-                None => py.None(),
-            },
+        match self.inner.info().custom_sections(&name).nth(index) {
+            Some(bytes) => PyBytes::new(py, &bytes).into_py(py),
             None => py.None(),
         }
     }
@@ -420,12 +358,10 @@ impl Module {
         let serialized_module = bytes.downcast::<PyBytes>()?.as_bytes();
 
         // Deserialize the artifact.
-        match Artifact::deserialize(serialized_module) {
+        match unsafe { Artifact::deserialize(serialized_module) } {
             Ok(artifact) => {
                 // Get the module from the artifact.
-                match unsafe {
-                    runtime_core::load_cache_with(artifact, &runtime::default_compiler())
-                } {
+                match runtime::load_cache_with(artifact) {
                     Ok(module) => Ok(Py::new(
                         py,
                         Self {
@@ -466,7 +402,7 @@ impl Module {
     /// ```
     #[getter]
     fn is_wasi_module(&self) -> bool {
-        wasmer_wasi::is_wasi_module(&self.inner)
+        wasmer_wasi::is_wasi_module(&self.inner.into_inner())
     }
 
     /// Checks the WASI version if any.
@@ -489,7 +425,7 @@ impl Module {
     #[args(strict = false)]
     fn wasi_version<'p>(&self, py: Python<'p>, strict: bool) -> PyObject {
         let version: Option<wasi::Version> =
-            wasmer_wasi::get_wasi_version(&self.inner, strict).map(Into::into);
+            wasmer_wasi::get_wasi_version(&self.inner.into_inner(), strict).map(Into::into);
 
         match version {
             Some(version) => version.to_object(py),

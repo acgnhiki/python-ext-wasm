@@ -1,4 +1,8 @@
-use crate::{import::ImportObject, module::Module};
+use crate::{
+    import::ImportObject,
+    module::Module,
+    wasmer::wasi::{WasiState, WasiStateBuilder, WasiVersion},
+};
 use pyo3::{
     exceptions::{RuntimeError, ValueError},
     prelude::*,
@@ -10,7 +14,6 @@ use std::{
     path::PathBuf,
     slice,
 };
-use wasmer_wasi::{state, WasiVersion};
 
 #[derive(Copy, Clone)]
 #[repr(u8)]
@@ -83,7 +86,7 @@ impl ToPyObject for Version {
 #[pyclass]
 #[text_signature = "(arguments=[], environments={}, preopen_directories=[], map_directories={})"]
 pub struct Wasi {
-    pub(crate) inner: state::WasiStateBuilder,
+    pub(crate) inner: WasiStateBuilder,
 }
 
 impl Wasi {
@@ -211,7 +214,7 @@ impl Wasi {
         map_directories: &PyDict,
     ) -> PyResult<Self> {
         let mut wasi = Self {
-            inner: state::WasiState::new(program_name.as_str()),
+            inner: WasiState::new(program_name.as_str()),
         };
 
         if !arguments.is_empty() {
@@ -355,7 +358,7 @@ impl Wasi {
         version: u8,
     ) -> PyResult<ImportObject> {
         let version: Version = if version == 0 {
-            wasmer_wasi::get_wasi_version(&module.inner, false)
+            wasmer_wasi::get_wasi_version(&module.inner.into_inner(), false)
                 .ok_or(())
                 .map(Into::into)
                 .map_err(|_| {

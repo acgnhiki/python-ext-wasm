@@ -16,8 +16,11 @@ pub(crate) mod globals;
 pub(crate) mod inspect;
 
 use crate::{
-    import::ImportObject, instance::exports::ExportedFunctions, instance::globals::ExportedGlobals,
+    import::ImportObject,
+    instance::exports::ExportedFunctions,
+    instance::globals::ExportedGlobals,
     memory::Memory,
+    wasmer::runtime::{self as runtime, Export},
 };
 use pyo3::{
     exceptions::RuntimeError,
@@ -27,7 +30,6 @@ use pyo3::{
     PyObject, Python,
 };
 use std::{collections::HashMap, sync::Arc};
-use wasmer_runtime::{self as runtime, Export};
 
 #[pyclass(unsendable)]
 #[text_signature = "(bytes, imported_functions={})"]
@@ -122,10 +124,12 @@ impl Instance {
 
         for (export_name, export) in exports {
             match export {
-                Export::Function { .. } => exported_functions.push(export_name),
-                Export::Global(global) => exported_globals.push((export_name, Arc::new(global))),
+                Export::Function { .. } => exported_functions.push(export_name.clone()),
+                Export::Global(global) => {
+                    exported_globals.push((export_name.clone(), Arc::new(global.into())))
+                }
                 Export::Memory(memory) if exported_memory.is_none() => {
-                    exported_memory = Some(Arc::new(memory))
+                    exported_memory = Some(Arc::new(memory.into()))
                 }
                 _ => (),
             }
