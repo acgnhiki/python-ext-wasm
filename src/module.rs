@@ -268,7 +268,8 @@ impl Module {
                             Type::F32 => "f32",
                             Type::F64 => "f64",
                             Type::V128 => "v128",
-                            _ => unimplemented!("{}", global.ty),
+                            Type::FuncRef => "funcref",
+                            Type::ExternRef => "externref",
                         },
                     )?;
                 }
@@ -292,7 +293,8 @@ impl Module {
                             Type::F32 => "f32",
                             Type::F64 => "f64",
                             Type::V128 => "v128",
-                            _ => unimplemented!("{}", table.ty),
+                            Type::FuncRef => "funcref",
+                            Type::ExternRef => "externref",
                         },
                     )?;
                 }
