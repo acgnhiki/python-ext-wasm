@@ -10,8 +10,8 @@ mod value;
 mod wasi;
 
 pub(crate) mod wasmer {
+    pub use wasmer_runtime as runtime;
     pub use wasmer_runtime_core as core;
-    pub use wasmer_runtime_deprecated as runtime;
     pub use wasmer_wasi as wasi;
 }
 

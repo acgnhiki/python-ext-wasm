@@ -45,7 +45,7 @@ impl ImportObject {
     ) -> PyResult<Self> {
         Ok(Self {
             inner: wasmer_wasi::generate_import_object_from_env(
-                core::get_global_store(),
+                &core::get_global_store(),
                 wasmer_wasi::WasiEnv::new(wasi.inner.build().map_err(|error| {
                     RuntimeError::py_err(format!("Failed to create the WASI state: {}", error))
                 })?),

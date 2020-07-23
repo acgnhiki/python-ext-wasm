@@ -15,7 +15,7 @@ name = "wasmer"
 crate-type = ["cdylib"]
 
 [dependencies]
-wasmer-runtime-deprecated = { path = "../wasmer-reborn/lib/deprecated/runtime", default-features = false }
+wasmer-runtime = { path = "../wasmer-reborn/lib/deprecated/runtime", default-features = false }
 wasmer-runtime-core = { path = "../wasmer-reborn/lib/deprecated/runtime-core", features = ["dynamicfunc-fat-closures"] }
 wasmer-wasi = { path = "../wasmer-reborn/lib/wasi" }
 pyo3 = { version = "0.11", features = ["extension-module"] }
@@ -24,9 +24,9 @@ wasmprinter = "0.2"
 
 [features]
 default = ["backend-cranelift"]
-backend-cranelift = ["wasmer-runtime-deprecated/default-backend-cranelift"]
-backend-singlepass = ["wasmer-runtime-deprecated/default-backend-singlepass"]
-backend-llvm = ["wasmer-runtime-deprecated/default-backend-llvm"]
+backend-cranelift = ["wasmer-runtime/default-backend-cranelift"]
+backend-singlepass = ["wasmer-runtime/default-backend-singlepass"]
+backend-llvm = ["wasmer-runtime/default-backend-llvm"]
 
 [package.metadata.maturin]
 project-url = [
